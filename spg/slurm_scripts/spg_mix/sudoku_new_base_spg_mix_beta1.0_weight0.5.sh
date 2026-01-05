@@ -1,15 +1,12 @@
 #!/bin/bash
-#SBATCH --output=../../slurm/%A/slurm.out
-#SBATCH --job-name=countdown-eubo
-#SBATCH --time=72:00:00
-#SBATCH --wait-all-nodes=1
-#SBATCH --open-mode=append
-
-#SBATCH --nodes=1
-#SBATCH --gpus-per-node=8
-#SBATCH --qos=storygen_high
-#SBATCH --account=storygen
-#SBATCH --cpus-per-task=12
+export WANDB_API_KEY=8d739e5eaa28091db300de37eb709020ff7cf27c
+export LOGDIR=../../logs
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HUB_DISABLE_TELEMETRY=1
+export PYTHONUNBUFFERED=True
+export CUDA_LAUNCH_BLOCKING=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+SAVE_DIR=/data/discrete-diffusionRL-LLM
 
 export LOGDIR=../../logs
 mkdir -p $LOGDIR
@@ -20,14 +17,13 @@ source activate spg
 RANDOM_PORT=$((RANDOM % 55536 + 10000))
 echo "Using random main_process_port: $RANDOM_PORT"
 
-SAVE_DIR=/data/discrete-diffusionRL-LLM
-
-DATASET="countdown"
-RUN_NAME=${DATASET}_base_spg_eubo_beta2.0
+DATASET="sudoku_new"
+FEW_SHOT=3
+RUN_NAME=${DATASET}_${FEW_SHOT}shot_base_spg_mix_beta1.0_weight0.5
 MODEL_PATH=${SAVE_DIR}/hf_models/LLaDA-8B-Instruct
 NUM_ITER=4
-srun --cpu-bind=none --output ${LOGDIR}/spg_eubo_%j.out \
-    accelerate launch \
+
+sudo -E /home/zhengkx/.conda/envs/spg/bin/python -m accelerate.commands.launch \
         --config_file ../accelerate_genai_a100.yaml \
         --main_process_port $RANDOM_PORT ../../diffu_grpo_train.py \
         --config ../train.yaml \
@@ -42,9 +38,12 @@ srun --cpu-bind=none --output ${LOGDIR}/spg_eubo_%j.out \
         --min_t 0 \
         --max_t 1 \
         --num_generations 6 \
-        --per_device_train_batch_size 6 \
-        --gradient_accumulation_steps 2 \
+        --per_device_train_batch_size 3 \
+        --gradient_accumulation_steps 4 \
         --beta 0.0 \
-        --logp_estimation eubo \
-        --eubo_beta 2.0 \
-    
+        --logp_estimation mix \
+        --mix_weight 0.5 \
+        --eubo_beta 1.0 \
+        --temperature 0.3 \
+        --few_shot $FEW_SHOT \
+        --max_prompt_length 1500

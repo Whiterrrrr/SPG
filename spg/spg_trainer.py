@@ -2,7 +2,7 @@
 
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-
+import time
 from pandas.core.apply import com
 import torch
 from trl.trainer.grpo_trainer import GRPOTrainer
@@ -47,6 +47,9 @@ class SPGTrainer(GRPOTrainer):
     Key features:
     - Separate log-likelihood estimation for positive and negative advantage traces
     - Block-wise masking for Monte Carlo estimation of log-likelihood
+
+    TODO: -- Whiterr notes --
+                Infer completion -> scoring with adavantage + estimate logp by masked forward -> RL tuning
     """
 
     def __init__(
@@ -91,15 +94,17 @@ class SPGTrainer(GRPOTrainer):
 
         prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
         completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
-        mask_seeds = inputs["mask_seeds"]
+        mask_seeds = inputs["mask_seeds"] # TODO: -- Whiterr notes ---
+                                                    # mask_seeds 不同mask stetagy, 用来拿sequence level logp 
+                                                    # (prompt不用，只拿completion)
 
         # Combine prompt and completion
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
         logits_to_keep = completion_ids.size(1)  # only compute logits for completion tokens
 
         # Get the current iteration index and corresponding mask seed
-        this_itr_idx = self._step % self.args.num_iterations
-        this_itr_mask_seed = mask_seeds[this_itr_idx]
+        this_itr_idx = self._step % self.args.num_iterations # TODO: -- Whiterr notes ---
+        this_itr_mask_seed = mask_seeds[this_itr_idx]                  # num_iterations - GRPO iter次数 (mu in GRPO)，每次iter都用同一种block mask
         input_ids = input_ids.unsqueeze(0)
         per_seq_logps = self._get_per_seq_logps(model, input_ids, logits_to_keep, [this_itr_mask_seed], prompt_mask, completion_mask, reward_mask=inputs['reward_mask']) # num_iterations, batch_size
         
@@ -113,8 +118,12 @@ class SPGTrainer(GRPOTrainer):
 
         # Compute the loss
         advantages = inputs["advantages"]
+
+        # TODO: 实际上就是negative sequence的log p计算方式变了下
         per_seq_loss = -advantages.unsqueeze(0) * per_seq_logps # [1, batch_size]
         completion_length = completion_mask.sum(dim=1).unsqueeze(0) # [1, batch_size]
+
+        # TODO: -- Whiterr notes -- 这里做了token (element)-level loss computation, 缓解因为sequence长度导致的update bias
         loss = (per_seq_loss * completion_length).sum() / completion_length.sum() # [1]
 
         # Log the metrics
@@ -380,6 +389,8 @@ class SPGTrainer(GRPOTrainer):
         return noisy_batch, block_mask
 
     def get_logits(self, model, batch, prompt_index, cfg_scale, mask_id, prompt_mask=None):
+        # TODO: --Whiterr notes -- 
+                # prompt+completion扰动, 对整个sequence算logits
         if len(batch.shape) == 3:
             multisample = True
             bsz, num_t, l = batch.shape
@@ -390,9 +401,11 @@ class SPGTrainer(GRPOTrainer):
         if prompt_mask is not None:
             prompt_mask = prompt_mask.bool()
             assert batch.shape[0] == prompt_mask.shape[0], f"batch.shape: {batch.shape}, prompt_mask.shape: {prompt_mask.shape}"
+            # TODO: -- Whiterr notes -- 只给prompt上mask
             prompt_mask = torch.cat([prompt_mask, torch.ones(batch.shape[0], batch.shape[1] - prompt_mask.shape[1], dtype=torch.bool, device=batch.device)], dim=1)
         
-        if cfg_scale > 0.0:
+        # TODO: -- Whiterr notes -- 
+        if cfg_scale > 0.0: # cfg==0的时候直接把conditioned输进去？cfg>0时启用guidance,因此构造uncoditioned batch
             assert len(prompt_index) == batch.shape[1]
             prompt_index = prompt_index.unsqueeze(0).repeat(batch.shape[0], 1)
             un_batch = batch.clone()
@@ -433,6 +446,10 @@ class SPGTrainer(GRPOTrainer):
     def _get_per_seq_logps(self, model, input_ids, logits_to_keep, mask_seeds, prompt_mask=None, completion_mask=None, reward_mask=None):
         """
         Calculate per-token log probabilities.
+
+        TODO: -- Whiterr notes --
+        每个iter把gt sequence按forward_process生成noisy version, 让model predict gt token
+        对masked token算logp, positive adavantage sequence直接mean成sequence level lop, negative adavantage sequence有四种不同的计算方式:eubo/mix/elbo/zero
         """
         num_iterations, batch_size, seq_len = input_ids.size()
         device = input_ids.device
@@ -451,6 +468,8 @@ class SPGTrainer(GRPOTrainer):
         all_perturbed_seqs = []
         all_expanded_inputs = []
         all_block_masks = []
+
+        # TODO: -- Whiterr notes -- 每次iter加不同的masking stretagy做forward noising
         for iter_idx, mask_seed in enumerate(mask_seeds):
             expanded_input = input_ids[iter_idx]  # [batch_size, seq_len]
             perturbed_seq, block_mask = self.forward_process(
@@ -459,6 +478,8 @@ class SPGTrainer(GRPOTrainer):
             all_perturbed_seqs.append(perturbed_seq)
             all_expanded_inputs.append(expanded_input)
             all_block_masks.append(block_mask)
+
+        # TODO: -- Whiterr notes -- 拼接一切sequence/mask成为[num_iterations * batch_size, num_t, seq_len]大小
         all_block_masks = torch.cat(all_block_masks, dim=0) # [num_iterations * batch_size, num_t, seq_len]
         # Concatenate all iterations into a single batch
         perturbed_seq = torch.cat(all_perturbed_seqs, dim=0)  # [num_iterations * batch_size, num_t, seq_len]
@@ -486,8 +507,9 @@ class SPGTrainer(GRPOTrainer):
         flat_logits = completion_logits.reshape(-1, completion_logits.size(-1))
         flat_targets = completion_targets.reshape(-1)
         
-        loss = F.cross_entropy(flat_logits, flat_targets, reduction="none")
-        prob = F.softmax(flat_logits, dim=-1).gather(dim=-1, index=flat_targets.unsqueeze(-1))
+        # TODO: -- Whiterr notes --− cross_entropy = - log(softmax(logit_y)) = - log p(y)
+        loss = F.cross_entropy(flat_logits, flat_targets, reduction="none") # 因此loss直出token y的log p(y)
+        prob = F.softmax(flat_logits, dim=-1).gather(dim=-1, index=flat_targets.unsqueeze(-1)) # prob = p(y), 只给后面eubo用
         
         # Convert to log probabilities and reshape
         completion_log_probs = -loss.view(num_iterations * batch_size, self.args.num_t, logits_to_keep)
@@ -545,7 +567,8 @@ class SPGTrainer(GRPOTrainer):
         if self.args.logp_estimation == 'eubo':
             per_seq_logps_negative = (per_token_avg_ps_dezero.log() * loss_mask).sum(dim=2) / loss_mask.sum(dim=2).clamp(min=1e-8) / self.args.eubo_beta
         elif self.args.logp_estimation == 'mix':
-            per_seq_logps_negative = self.args.mix_weight * (per_token_avg_ps_dezero.log() * loss_mask).sum(dim=2) / loss_mask.sum(dim=2).clamp(min=1e-8) / self.args.eubo_beta + (1-self.args.mix_weight) * per_seq_logps.mean(dim=2)
+            per_seq_logps_negative = self.args.mix_weight * (per_token_avg_ps_dezero.log() * loss_mask).sum(dim=2) / loss_mask.sum(dim=2).clamp(min=1e-8) / self.args.eubo_beta \
+                                        + (1-self.args.mix_weight) * per_seq_logps.mean(dim=2)
         elif self.args.logp_estimation == 'elbo':
             per_seq_logps_negative = per_seq_logps.mean(dim=2)
         elif self.args.logp_estimation == 'zero':

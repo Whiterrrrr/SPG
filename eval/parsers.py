@@ -48,6 +48,7 @@ def evaluate_equation(equation_str):
         return None
 
 
+# TODO: --Whiterr notes-- Here to print the prompt and gt, if find time comsuming, just stop print
 def compute_score(solution_str, ground_truth, method="strict", format_score=0.1, score=1.0):
     """The scoring function for countdown task.
 

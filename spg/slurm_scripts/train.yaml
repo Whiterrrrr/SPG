@@ -69,5 +69,5 @@ beta: 0.04
 epsilon: 0.5
 num_iterations: 12
 
-trainer: diffu_grpo
+trainer: spg
 use_mask_prompt: true

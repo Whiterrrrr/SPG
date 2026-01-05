@@ -29,7 +29,7 @@ echo "Using random main_process_port: $MASTER_PORT"
 # Arrays of tasks and generation lengths
 TASKS=("countdown")
 GEN_LENGTHS=(128 256 512)
-SAVE_DIR=/fsx-checkpoints/
+SAVE_DIR=/data/discrete-diffusionRL-LLM
 
 # Generate checkpoints using a for loop
 CKPTS=()

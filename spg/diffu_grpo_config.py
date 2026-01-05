@@ -161,6 +161,11 @@ class DiffuGRPOConfig(TrainingArguments):
         default="",
     )
 
+    resume_checkpoint_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to a PEFT/adapter checkpoint to resume from (optional)."},
+    )
+
     num_generations: Optional[int] = field(
         default=8,
         metadata={
